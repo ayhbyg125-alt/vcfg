@@ -36,14 +36,14 @@ jobs:
           $api = 'https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/v0.5.4'
           $headers = @{ 'User-Agent' = 'vcfg-ci' }
           $release = Invoke-RestMethod -Uri $api -Headers $headers
-          $asset = $release.assets | Where-Object { $_.name -match '(?i)\.zip$' } | Select-Object -First 1
-          if (-not $asset) { throw 'No Windows/toolchain ZIP asset found in OpenOrbis v0.5.4' }
+          $asset = $release.assets | Where-Object { $_.name -eq 'toolchain-llvm-18.tar.gz' } | Select-Object -First 1
+          if (-not $asset) { throw 'OpenOrbis v0.5.4 toolchain-llvm-18.tar.gz not found' }
 
           $archive = Join-Path $env:RUNNER_TEMP $asset.name
           $dest = Join-Path $env:RUNNER_TEMP 'OpenOrbis'
           Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $archive
           New-Item -ItemType Directory -Force $dest | Out-Null
-          Expand-Archive -Path $archive -DestinationPath $dest -Force
+          tar -xzf $archive -C $dest
 
           $link = Get-ChildItem -Path $dest -Recurse -Filter 'link.x' | Select-Object -First 1
           if (-not $link) { throw 'OpenOrbis link.x not found after extraction' }
@@ -57,7 +57,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           git clone --depth 1 https://github.com/GoldHEN/GoldHEN_Plugins_SDK.git "$env:RUNNER_TEMP\GoldHEN_Plugins_SDK"
-          $env:OO_PS4_TOOLCHAIN = "$env:OO_PS4_TOOLCHAIN"
           Set-Location "$env:RUNNER_TEMP\GoldHEN_Plugins_SDK"
           cmd /c build_static.bat
           if ($LASTEXITCODE -ne 0) { throw 'GoldHEN SDK build_static.bat failed' }
