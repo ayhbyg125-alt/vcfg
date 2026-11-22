@@ -21,13 +21,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install LLVM and Python
+      - name: Install LLVM 18.1.8 and Python
         shell: pwsh
         run: |
-          choco install llvm -y --no-progress
+          $ErrorActionPreference = 'Stop'
+          $llvmRoot = Join-Path $env:RUNNER_TEMP 'LLVM18'
+          $installer = Join-Path $env:RUNNER_TEMP 'LLVM-18.1.8-win64.exe'
+          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe' -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList '/S', "/D=$llvmRoot" -Wait -NoNewWindow
+          if (-not (Test-Path (Join-Path $llvmRoot 'bin\clang.exe'))) { throw 'LLVM 18 clang.exe not found' }
+          if (-not (Test-Path (Join-Path $llvmRoot 'bin\lli.exe'))) { throw 'LLVM 18 lli.exe not found' }
+          "LLVM_BIN=$llvmRoot\bin" >> $env:GITHUB_ENV
           python --version
-          clang --version
-          ld.lld --version
+          & "$llvmRoot\bin\clang.exe" --version
+          & "$llvmRoot\bin\ld.lld.exe" --version
+          & "$llvmRoot\bin\lli.exe" --version
 
       - name: Download OpenOrbis PS4 Toolchain
         shell: pwsh
@@ -66,7 +74,7 @@ jobs:
       - name: Create VCFG config
         shell: pwsh
         run: |
-          $llvm = Split-Path (Get-Command clang.exe).Source
+          $llvm = $env:LLVM_BIN
           $cfg = @{
             openorbis_toolchain = $env:OO_PS4_TOOLCHAIN
             goldhen_sdk = $env:GOLDHEN_SDK
