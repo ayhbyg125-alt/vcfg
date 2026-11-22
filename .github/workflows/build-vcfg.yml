@@ -21,21 +21,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install LLVM 18.1.8 and Python
+      - name: Install LLVM 18.1.8 archive and Python
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $llvmRoot = Join-Path $env:RUNNER_TEMP 'LLVM18'
-          $installer = Join-Path $env:RUNNER_TEMP 'LLVM-18.1.8-win64.exe'
-          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe' -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList '/S', "/D=$llvmRoot" -Wait -NoNewWindow
-          if (-not (Test-Path (Join-Path $llvmRoot 'bin\clang.exe'))) { throw 'LLVM 18 clang.exe not found' }
-          if (-not (Test-Path (Join-Path $llvmRoot 'bin\lli.exe'))) { throw 'LLVM 18 lli.exe not found' }
-          "LLVM_BIN=$llvmRoot\bin" >> $env:GITHUB_ENV
+          $llvmArchive = Join-Path $env:RUNNER_TEMP 'clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz'
+          $llvmExtract = Join-Path $env:RUNNER_TEMP 'LLVM18'
+
+          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz' -OutFile $llvmArchive
+
+          $hash = (Get-FileHash -Algorithm SHA256 $llvmArchive).Hash.ToLowerInvariant()
+          if ($hash -ne '22c5907db053026cc2a8ff96d21c0f642a90d24d66c23c6d28ee7b1d572b82e8') {
+            throw "LLVM 18.1.8 archive SHA256 mismatch: $hash"
+          }
+
+          New-Item -ItemType Directory -Force $llvmExtract | Out-Null
+          tar -xJf $llvmArchive -C $llvmExtract
+
+          $llvmBin = Get-ChildItem -Path $llvmExtract -Recurse -Directory -Filter 'bin' |
+            Where-Object {
+              (Test-Path (Join-Path $_.FullName 'clang.exe')) -and
+              (Test-Path (Join-Path $_.FullName 'lli.exe')) -and
+              (Test-Path (Join-Path $_.FullName 'llc.exe')) -and
+              (Test-Path (Join-Path $_.FullName 'ld.lld.exe'))
+            } |
+            Select-Object -First 1
+
+          if (-not $llvmBin) { throw 'LLVM 18.1.8 clang/lli/llc/ld.lld toolset was not found' }
+
+          "LLVM_BIN=$($llvmBin.FullName)" >> $env:GITHUB_ENV
+
           python --version
-          & "$llvmRoot\bin\clang.exe" --version
-          & "$llvmRoot\bin\ld.lld.exe" --version
-          & "$llvmRoot\bin\lli.exe" --version
+          & (Join-Path $llvmBin.FullName 'clang.exe') --version
+          & (Join-Path $llvmBin.FullName 'ld.lld.exe') --version
+          & (Join-Path $llvmBin.FullName 'llc.exe') --version
+          & (Join-Path $llvmBin.FullName 'lli.exe') --version
 
       - name: Download OpenOrbis PS4 Toolchain
         shell: pwsh
