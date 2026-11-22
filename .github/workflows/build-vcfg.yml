@@ -11,61 +11,90 @@ on:
       - 'build.ps1'
       - 'config.example.json'
       - '.github/workflows/build-vcfg.yml'
-      - 'build-vcfg-linux.sh'
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout VCFG
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install LLVM and Python
+        shell: pwsh
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld llvm python3 python3-pip curl tar make
+          choco install llvm -y --no-progress
+          python --version
           clang --version
           ld.lld --version
-          python3 --version
 
-      - name: Download OpenOrbis v0.5.4
+      - name: Download OpenOrbis PS4 Toolchain
+        shell: pwsh
         run: |
-          set -e
-          mkdir -p "$RUNNER_TEMP/openorbis"
-          curl -L --fail --retry 3 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/v0.5.4.tar.gz -o "$RUNNER_TEMP/openorbis/v0.5.4.tar.gz"
-          tar -xzf "$RUNNER_TEMP/openorbis/v0.5.4.tar.gz" -C "$RUNNER_TEMP/openorbis"
-          test -f "$RUNNER_TEMP/openorbis/link.x"
-          echo "OO_PS4_TOOLCHAIN=$RUNNER_TEMP/openorbis" >> "$GITHUB_ENV"
+          $ErrorActionPreference = 'Stop'
+          $api = 'https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/v0.5.4'
+          $headers = @{ 'User-Agent' = 'vcfg-ci' }
+          $release = Invoke-RestMethod -Uri $api -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -match '(?i)\.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw 'No Windows/toolchain ZIP asset found in OpenOrbis v0.5.4' }
+
+          $archive = Join-Path $env:RUNNER_TEMP $asset.name
+          $dest = Join-Path $env:RUNNER_TEMP 'OpenOrbis'
+          Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $archive
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $dest -Force
+
+          $link = Get-ChildItem -Path $dest -Recurse -Filter 'link.x' | Select-Object -First 1
+          if (-not $link) { throw 'OpenOrbis link.x not found after extraction' }
+
+          $tc = $link.Directory.FullName
+          "OO_PS4_TOOLCHAIN=$tc" >> $env:GITHUB_ENV
+          Write-Host "OpenOrbis: $tc"
 
       - name: Build GoldHEN Plugin SDK
+        shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/GoldHEN/GoldHEN_Plugins_SDK.git "$RUNNER_TEMP/GoldHEN_Plugins_SDK"
-          make -C "$RUNNER_TEMP/GoldHEN_Plugins_SDK" clean all
-          test -f "$RUNNER_TEMP/GoldHEN_Plugins_SDK/libGoldHEN_Hook.a"
-          echo "GOLDHEN_SDK=$RUNNER_TEMP/GoldHEN_Plugins_SDK" >> "$GITHUB_ENV"
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 https://github.com/GoldHEN/GoldHEN_Plugins_SDK.git "$env:RUNNER_TEMP\GoldHEN_Plugins_SDK"
+          $env:OO_PS4_TOOLCHAIN = "$env:OO_PS4_TOOLCHAIN"
+          Set-Location "$env:RUNNER_TEMP\GoldHEN_Plugins_SDK"
+          cmd /c build_static.bat
+          if ($LASTEXITCODE -ne 0) { throw 'GoldHEN SDK build_static.bat failed' }
+          if (-not (Test-Path 'libGoldHEN_Hook.a')) { throw 'libGoldHEN_Hook.a was not produced' }
+          "GOLDHEN_SDK=$env:RUNNER_TEMP\GoldHEN_Plugins_SDK" >> $env:GITHUB_ENV
 
-      - name: Create Linux build config
+      - name: Create VCFG config
+        shell: pwsh
         run: |
-          cat > config.json <<EOF
-          {
-            "openorbis_toolchain": "$OO_PS4_TOOLCHAIN",
-            "goldhen_sdk": "$GOLDHEN_SDK",
-            "llvm_bin": "/usr/bin",
-            "llc_gfx700": "/usr/bin/llc",
-            "python": "python3"
-          }
-          EOF
+          $llvm = Split-Path (Get-Command clang.exe).Source
+          $cfg = @{
+            openorbis_toolchain = $env:OO_PS4_TOOLCHAIN
+            goldhen_sdk = $env:GOLDHEN_SDK
+            llvm_bin = $llvm
+            llc_gfx700 = (Join-Path $llvm 'llc.exe')
+            python = 'python'
+            ps4_host = '127.0.0.1'
+            ps4_ftp_port = 2121
+            classic_prx = ''
+            classic_bb_prx = ''
+          } | ConvertTo-Json
+          Set-Content -Path config.json -Value $cfg -Encoding UTF8
+          Get-Content config.json
 
-      - name: Build modified VCFG
+      - name: Build VCFG with upstream build.ps1
+        shell: pwsh
         run: |
-          chmod +x build-vcfg-linux.sh
-          ./build-vcfg-linux.sh
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Target plugin
+          if ($LASTEXITCODE -ne 0) { throw 'VCFG build.ps1 failed' }
+          if (-not (Test-Path 'build\vcfg\vcfg.prx')) { throw 'vcfg.prx was not produced' }
 
-      - name: Upload VCFG PRX
+      - name: Upload PRX
         uses: actions/upload-artifact@v4
         with:
           name: vcfg-custom-ui-prx
-          path: build/vcfg/vcfg.prx
+          path: |
+            build/vcfg/vcfg.prx
+            build/vcfg/vcfg.oelf
+            build/vcfg/vcfg.elf
           if-no-files-found: error
