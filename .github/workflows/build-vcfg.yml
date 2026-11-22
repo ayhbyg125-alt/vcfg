@@ -11,75 +11,57 @@ on:
       - 'build.ps1'
       - 'config.example.json'
       - '.github/workflows/build-vcfg.yml'
+      - 'build-vcfg-linux.sh'
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout VCFG
         uses: actions/checkout@v4
 
-      - name: Install LLVM and Python
-        shell: pwsh
+      - name: Install build dependencies
         run: |
-          choco install llvm -y --no-progress
-          python --version
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm python3 python3-pip curl tar make
           clang --version
           ld.lld --version
+          python3 --version
 
-      - name: Download OpenOrbis PS4 Toolchain
-        shell: pwsh
+      - name: Download OpenOrbis v0.5.4
         run: |
-          $ErrorActionPreference = 'Stop'
-          $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest'
-          $asset = $r.assets | Where-Object { $_.name -match '\\.(zip|tar\\.gz)$' -and $_.name -match '(?i)win|windows' } | Select-Object -First 1
-          if (-not $asset) {
-            $asset = $r.assets | Where-Object { $_.name -match '\\.(zip|tar\\.gz)$' } | Select-Object -First 1
+          set -e
+          mkdir -p "$RUNNER_TEMP/openorbis"
+          curl -L --fail --retry 3 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/v0.5.4.tar.gz -o "$RUNNER_TEMP/openorbis/v0.5.4.tar.gz"
+          tar -xzf "$RUNNER_TEMP/openorbis/v0.5.4.tar.gz" -C "$RUNNER_TEMP/openorbis"
+          test -f "$RUNNER_TEMP/openorbis/link.x"
+          echo "OO_PS4_TOOLCHAIN=$RUNNER_TEMP/openorbis" >> "$GITHUB_ENV"
+
+      - name: Build GoldHEN Plugin SDK
+        run: |
+          git clone --depth 1 https://github.com/GoldHEN/GoldHEN_Plugins_SDK.git "$RUNNER_TEMP/GoldHEN_Plugins_SDK"
+          make -C "$RUNNER_TEMP/GoldHEN_Plugins_SDK" clean all
+          test -f "$RUNNER_TEMP/GoldHEN_Plugins_SDK/libGoldHEN_Hook.a"
+          echo "GOLDHEN_SDK=$RUNNER_TEMP/GoldHEN_Plugins_SDK" >> "$GITHUB_ENV"
+
+      - name: Create Linux build config
+        run: |
+          cat > config.json <<EOF
+          {
+            "openorbis_toolchain": "$OO_PS4_TOOLCHAIN",
+            "goldhen_sdk": "$GOLDHEN_SDK",
+            "llvm_bin": "/usr/bin",
+            "llc_gfx700": "/usr/bin/llc",
+            "python": "python3"
           }
-          if (-not $asset) { throw 'No OpenOrbis release archive found' }
-          Write-Host "Downloading $($asset.name)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\\openorbis.zip"
-          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\\OpenOrbis" | Out-Null
-          Expand-Archive -Path "$env:RUNNER_TEMP\\openorbis.zip" -DestinationPath "$env:RUNNER_TEMP\\OpenOrbis" -Force
-          $root = Get-ChildItem "$env:RUNNER_TEMP\\OpenOrbis" -Directory | Where-Object { Test-Path "$($_.FullName)\\link.x" } | Select-Object -First 1
-          if (-not $root) {
-            $root = Get-Item "$env:RUNNER_TEMP\\OpenOrbis"
-          }
-          "OO_PS4_TOOLCHAIN=$($root.FullName)" >> $env:GITHUB_ENV
+          EOF
 
-      - name: Download GoldHEN Plugin SDK
-        shell: pwsh
+      - name: Build modified VCFG
         run: |
-          $ErrorActionPreference = 'Stop'
-          git clone --depth 1 https://github.com/GoldHEN/GoldHEN_Plugins_SDK.git "$env:RUNNER_TEMP\\GoldHEN_Plugins_SDK"
-          $env:GOLDHEN_SDK = "$env:RUNNER_TEMP\\GoldHEN_Plugins_SDK"
-          "GOLDHEN_SDK=$env:GOLDHEN_SDK" >> $env:GITHUB_ENV
-          cmd /c "$env:GOLDHEN_SDK\\build_static.bat"
-          if ($LASTEXITCODE -ne 0) { throw 'GoldHEN SDK build failed' }
-
-      - name: Create build config
-        shell: pwsh
-        run: |
-          $cfg = @{
-            openorbis_toolchain = $env:OO_PS4_TOOLCHAIN
-            goldhen_sdk = $env:GOLDHEN_SDK
-            llvm_bin = (Split-Path (Get-Command clang).Source)
-            llc_gfx700 = (Get-Command clang).Source
-            python = 'python'
-            ps4_host = '127.0.0.1'
-            ps4_ftp_port = 2121
-            classic_prx = ''
-            classic_bb_prx = ''
-          } | ConvertTo-Json
-          Set-Content -Path config.json -Value $cfg -Encoding UTF8
-
-      - name: Build VCFG plugin
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
-          if ($LASTEXITCODE -ne 0) { throw 'VCFG build failed' }
+          chmod +x build-vcfg-linux.sh
+          ./build-vcfg-linux.sh
 
       - name: Upload VCFG PRX
         uses: actions/upload-artifact@v4
